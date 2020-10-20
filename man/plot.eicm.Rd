@@ -4,8 +4,12 @@
 \alias{plot.eicm}
 \title{Quick plot EICM results}
 \usage{
-\method{plot}{eicm}(x, type = ifelse(is.null(true.model), "network",
-  "coefficients"), true.model = NULL, ...)
+\method{plot}{eicm}(
+  x,
+  type = ifelse(is.null(true.model), "network", "coefficients"),
+  true.model = NULL,
+  ...
+)
 }
 \arguments{
 \item{x}{a EICM model.}
@@ -18,7 +22,8 @@ See details.}
 \item{...}{further arguments to pass to \code{\link{coefficientComparisonPlot}} or other plotting functions.}
 }
 \value{
-NULL.
+If \code{true.model} is provided and \code{type="coefficients"}, returns a named vector with 
+accuracy statistics (invisibly). Otherwise, NULL.
 }
 \description{
 Multiple types of plots for EICM models: coefficients, network topology, confidence intervals and likelihood profiles.

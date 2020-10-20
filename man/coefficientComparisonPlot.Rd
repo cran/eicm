@@ -4,10 +4,20 @@
 \alias{coefficientComparisonPlot}
 \title{Diagnostic monitor plots for EICM}
 \usage{
-coefficientComparisonPlot(model, true.model, nenv.to.plot = 0,
-  nlatent.to.plot = 0, plot.interactions = any(model$sp != 0),
-  plot.intercept = FALSE, excluded.interactions = NULL,
-  layout = TRUE, noplot = FALSE, env.stats = TRUE, legend = TRUE)
+coefficientComparisonPlot(
+  model,
+  true.model,
+  nenv.to.plot = 0,
+  nlatent.to.plot = 0,
+  plot.interactions = any(model$sp != 0),
+  plot.intercept = FALSE,
+  excluded.interactions = NULL,
+  layout = TRUE,
+  noplot = FALSE,
+  env.stats = TRUE,
+  legend = TRUE,
+  ...
+)
 }
 \arguments{
 \item{model}{the EICM model of interest.}
@@ -31,6 +41,8 @@ coefficientComparisonPlot(model, true.model, nenv.to.plot = 0,
 \item{env.stats}{logical. Compute accuracy for environmental predictors?}
 
 \item{legend}{logical. Plot legend?}
+
+\item{...}{further arguments to pass to \code{plot}.}
 }
 \value{
 A vector with accuracy statistics.

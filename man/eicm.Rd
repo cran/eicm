@@ -4,14 +4,33 @@
 \alias{eicm}
 \title{Fit and select an Explicit Interaction Community Model (EICM)}
 \usage{
-eicm(occurrences, env = NULL, traits = NULL, intercept = TRUE,
-  n.latent = 0, forbidden = NULL, mask.sp = NULL,
-  exclude.prevalence = 0, regularization = c(ifelse(n.latent > 0, 6,
-  0.5), ifelse(do.selection, 0.5, 0.1)), regularization.type = "ridge",
-  penalty = 4, theta.threshold = 0.5, latent.lambda = 1,
-  fit.all.with.latents = TRUE, popsize.sel = 2,
-  n.cores = parallel::detectCores(), true.model = NULL,
-  do.selection = TRUE, do.plots = TRUE)
+eicm(
+  occurrences,
+  env = NULL,
+  traits = NULL,
+  intercept = TRUE,
+  n.latent = 0,
+  rotate.latents = FALSE,
+  scale.latents = TRUE,
+  forbidden = NULL,
+  allowed = NULL,
+  mask.sp = NULL,
+  exclude.prevalence = 0,
+  regularization = c(ifelse(n.latent > 0, 6, 0.5), 1),
+  regularization.type = "hybrid",
+  penalty = 4,
+  theta.threshold = 0.5,
+  latent.lambda = 1,
+  fit.all.with.latents = TRUE,
+  popsize.sel = 2,
+  n.cores = parallel::detectCores(),
+  parallel = FALSE,
+  true.model = NULL,
+  do.selection = TRUE,
+  do.plots = TRUE,
+  fast = FALSE,
+  refit.selected = TRUE
+)
 }
 \arguments{
 \item{occurrences}{a binary (0/1) sample x species matrix, possibly including NAs.}
@@ -25,7 +44,16 @@ species interactions \emph{a priori}.}
 
 \item{n.latent}{the number of latent variables to estimate.}
 
-\item{forbidden}{a formula defining which species interactions are not to be estimated. See details.
+\item{rotate.latents}{logical. Rotate the estimated latent variable values (the values of the
+latents at each sample) in the first step with PCA? Defaults to FALSE.}
+
+\item{scale.latents}{logical. Standardize the estimated latent variable values (the values of the
+latents at each sample) in the first step? Defaults to TRUE.}
+
+\item{forbidden}{a formula (or list of) defining which species interactions are not to be estimated. See details.
+This constraint is cumulative with other constraints (\code{mask.sp} and \code{exclude.prevalence}).}
+
+\item{allowed}{a formula (or list of) defining which species interactions are to be estimated. See details.
 This constraint is cumulative with other constraints (\code{mask.sp} and \code{exclude.prevalence}).}
 
 \item{mask.sp}{a scalar or a binary square species x species matrix defining which species interactions to exclude
@@ -41,7 +69,8 @@ other constraints (\code{forbidden} and \code{mask.sp})}
 \item{regularization}{a two-element numeric vector defining the regularization lambdas used for
 environmental coefficients and for species interactions respectively. See details.}
 
-\item{regularization.type}{one of "lasso" or "ridge", defining the type of penalty to apply.}
+\item{regularization.type}{one of "lasso", "ridge" or "hybrid", defining the type of penalty to apply.
+Type "hybrid" applies ridge penalty to environmental coefficients and LASSO to interaction coefficients.}
 
 \item{penalty}{the penalty applied to the number of species interactions to include, during variable selection.}
 
@@ -57,7 +86,10 @@ when estimating the preliminary species interactions.}
 \item{popsize.sel}{the population size for the genetic algorithm, expressed as the factor to multiply
 by the recommended minimum. Ignored if \code{do.selection=FALSE}.}
 
-\item{n.cores}{the number of CPU cores to use in the variable selection stage. Ignored if \code{do.selection=FALSE}.}
+\item{n.cores}{the number of CPU cores to use in the variable selection stage and in the optimization.}
+
+\item{parallel}{logical. Whether to use \code{\link[optimParallel]{optimParallel}} during optimizations
+instead of \code{\link[stats]{optim}}.}
 
 \item{true.model}{for validation purposes only: the true model that has generated the data, to which
 the estimated coefficients will be compared in each selection algorithm iteration.}
@@ -65,6 +97,11 @@ the estimated coefficients will be compared in each selection algorithm iteratio
 \item{do.selection}{logical. Conduct the variable selection stage, over species interaction network topology?}
 
 \item{do.plots}{logical. Plot diagnostic and trace plots?}
+
+\item{fast}{a logical defining whether to do a fast - but less accurate - estimation, or a normal estimation.}
+
+\item{refit.selected}{logical. Refit with exact estimates the best model after network selection? Note that,
+for performance reasons, the models fit during the network selection stage use an approximate likelihood.}
 }
 \value{
 A \code{eicm.list} with the following components:

@@ -32,17 +32,22 @@ logLik.eicm <- function(object, occurrences=NULL, allow.na=TRUE, ...) {
 		
 		regularization <- attr(object, "regularization")
 		if(!is.null(regularization) && any(regularization > 0)) {
-			switch(pmatch(attr(regularization, "type"), c("lasso", "ridge")), {
+			switch(attr(regularization, "type"), lasso={
 				out <- out - 
 					regularization[1] * sum(abs(object$model$samples)) -
 					regularization[1] * sum(abs(object$model$env[, -1])) -	# exclude intercept from penalty
 					regularization[2] * sum(abs(object$model$sp))
-			}, {
+			}, ridge={
 				out <- out - 
 					regularization[1] * sum(object$model$samples ^ 2) -
 					regularization[1] * sum(object$model$env[, -1] ^ 2) -	# exclude intercept from penalty
 					regularization[2] * sum(object$model$sp ^ 2)
-			})
+			}, hybrid={
+				out <- out - 
+					regularization[1] * sum(object$model$samples ^ 2) -
+					regularization[1] * sum(object$model$env[, -1] ^ 2) -	# exclude intercept from penalty
+					regularization[2] * sum(abs(object$model$sp))
+			}, stop(sprintf("Invalid regularization type: %s", attr(regularization, "type"))))
 			penalized <- TRUE
 		}
 #	}
@@ -64,17 +69,22 @@ logLikValue.eicm <- function(eicm, presences, allow.na=TRUE) {
 		
 	regularization <- attr(eicm, "regularization")
 	if(!is.null(regularization) && any(regularization > 0)) {
-		switch(pmatch(attr(regularization, "type"), c("lasso", "ridge")), {
+		switch(attr(regularization, "type"), lasso={
 			llh <- llh - 
 				regularization[1] * sum(abs(eicm$model$samples)) -
 				regularization[1] * sum(abs(eicm$model$env[, -1])) -	# exclude intercept from penalty
 				regularization[2] * sum(abs(eicm$model$sp))
-		}, {
+		}, ridge={
 			llh <- llh - 
 				regularization[1] * sum(eicm$model$samples ^ 2) -
 				regularization[1] * sum(eicm$model$env[, -1] ^ 2) -	# exclude intercept from penalty
 				regularization[2] * sum(eicm$model$sp ^ 2)
-		})
+		}, hybrid={
+			llh <- llh - 
+				regularization[1] * sum(eicm$model$samples ^ 2) -
+				regularization[1] * sum(eicm$model$env[, -1] ^ 2) -	# exclude intercept from penalty
+				regularization[2] * sum(abs(eicm$model$sp))
+		}, stop(sprintf("Invalid regularization type: %s", attr(regularization, "type"))))
 	}
 	return(llh)
 }

@@ -11,7 +11,9 @@
 #'
 #' @inheritParams eicm.data
 #' @param n.latent the number of latent variables to estimate.
-#' @param forbidden a formula defining which species interactions are not to be estimated. See details.
+#' @param forbidden a formula (or list of) defining which species interactions are not to be estimated. See details.
+#'        This constraint is cumulative with other constraints (\code{mask.sp} and \code{exclude.prevalence}).
+#' @param allowed a formula (or list of) defining which species interactions are to be estimated. See details.
 #'        This constraint is cumulative with other constraints (\code{mask.sp} and \code{exclude.prevalence}).
 #' @param mask.sp a scalar or a binary square species x species matrix defining which species interactions to exclude
 #'        (0) or include (1) \emph{a priori}. If a scalar (0 or 1), 0 excludes all interactions, 1 allows all interactions.
@@ -27,8 +29,11 @@
 #'        fitting when there are previous estimates available.
 #' @param regularization a two-element numeric vector defining the regularization lambdas used for
 #'        environmental coefficients and for species interactions respectively. See details.
-#' @param regularization.type one of "lasso" or "ridge", defining the type of penalty to apply.
+#' @param regularization.type one of "lasso", "ridge" or "hybrid", defining the type of penalty to apply.
+#'        Type "hybrid" applies ridge penalty to environmental coefficients and LASSO to interaction coefficients.
 #' @param fast a logical defining whether to do a fast - but less accurate - estimation, or a normal estimation.
+#' @param n.cores the number of CPU cores to use in the L-BFGS-B optimization. This may be reduced to prevent
+#'        excessive memory usage.
 #' @param optim.method the optimization function to use. Should be set to the default.
 #' @param optim.control the optimization parameters to use. Should be set to the defaults.
 #'
@@ -71,14 +76,16 @@
 #' }
 #' @export
 eicm.fit <- function(occurrences, env=NULL, traits=NULL, intercept=TRUE,
-	n.latent=0, forbidden=NULL, mask.sp=NULL, exclude.prevalence=0, options=NULL, initial.values=NULL,
-	regularization=c(ifelse(n.latent > 0, 0.5, 0), 0.5), regularization.type="ridge",
-	fast=FALSE,
-	optim.method=ifelse(fast, "ucminf", "L-BFGS-B"),
-	optim.control=if(fast) list(trace=1, maxeval=10000, gradstep=c(0.001, 0.001), grtol=0.1) else
-		list(trace=1, maxit=10000, ndeps=0.0001)
+	n.latent=0, forbidden=NULL, allowed=NULL, mask.sp=NULL, exclude.prevalence=0, options=NULL, initial.values=NULL,
+	regularization=c(ifelse(n.latent > 0, 0.5, 0), 1), regularization.type="hybrid",
+	fast=FALSE, n.cores=1,
+	optim.method="L-BFGS-B",
+	optim.control=list(trace=1, maxit=10000, ndeps=0.0001, factr=ifelse(fast, 0.0001, 0.000001) / .Machine$double.eps)
 	) {
-	
+
+	if(!(regularization.type %in% c("ridge", "lasso", "hybrid")))
+		stop("Regularization type must be one of: ridge, lasso, hybrid")
+		
 	if(is.null(env))
 		env <- matrix(0, nrow=nrow(occurrences), ncol=0)
 		
@@ -116,21 +123,33 @@ eicm.fit <- function(occurrences, env=NULL, traits=NULL, intercept=TRUE,
 	nsamples <- nrow(occurrences)
 	nspecies <- ncol(occurrences)
 	
+	# Interaction exclusions
 	if(!is.null(exclude.prevalence) && exclude.prevalence > 0) {
 		options <- excludePrevalence(options, exclude.prevalence, occurrences)
 #		message(sprintf("Excluded from estimation interactions involving species with %d or less presences, or with %d or more presences.", exclude.prevalence, nsamples - exclude.prevalence))
-		message(sprintf("Excluded from estimation interactions involving species with %d or less presences.", exclude.prevalence))
+		message(sprintf("Excluded from estimation interactions departing from (caused by) species with %d or less presences.", exclude.prevalence))
 	}
 
 	if(is.null(traits))
 		traits <- matrix(ncol=0, nrow=nspecies, dimnames=list(colnames(occurrences), NULL))
-		
+
 	if(!is.null(forbidden)) {
-		tmpmask <- getMaskFromForbidden(forbidden, traits, data=occurrences)
+		tmpmask1 <- getMaskFromForbidden(forbidden, traits, data=occurrences, invert=FALSE)
 		# ensure the mask conforms to the occurrences
-		tmpmask <- tmpmask[colnames(occurrences), colnames(occurrences)]
-		options <- options + list(mask=list(sp=tmpmask))
+		tmpmask1 <- tmpmask1[colnames(occurrences), colnames(occurrences)]
 	}
+
+	if(!is.null(allowed)) {
+		tmpmask2 <- getMaskFromForbidden(allowed, traits, data=occurrences, invert=TRUE)
+		# ensure the mask conforms to the occurrences
+		tmpmask2 <- tmpmask2[colnames(occurrences), colnames(occurrences)]
+	}
+
+	if(exists("tmpmask1"))
+		options <- options + list(mask=list(sp=tmpmask1))
+
+	if(exists("tmpmask2"))
+		options <- options + list(mask=list(sp=tmpmask2))
 
 	if(is.null(options$offset))
 		options$offset <- list(
@@ -178,11 +197,34 @@ eicm.fit <- function(occurrences, env=NULL, traits=NULL, intercept=TRUE,
 		optim.control$ndeps <- rep(optim.control$ndeps, npars)
 
 	# Estimate parameters
-	fitted <- switch(optim.method, "L-BFGS-B"={
-		stats::optim(init, single.objective.function, fixed.pars=fixed.pars, method=optim.method, control=optim.control)
-	}, "ucminf"={
-		ucminf::ucminf(init, single.objective.function, fixed.pars=fixed.pars, hessian=0, control=optim.control)
-	})
+	tmp <- max(1, min(n.cores, floor(2 / (npars * npars * 8 / (1024^3)))))
+	if(n.cores != tmp) {
+		n.cores <- tmp
+		message(sprintf("Decreased number of cores to %d.", tmp))
+	}
+	fitted <- switch(optim.method,
+		"L-BFGS-B"={
+			if(n.cores > 1) {
+				message(sprintf("Optimizing with parallel L-BFGS-B%s", ifelse(fast, ", with approximate likelihood", "")))
+				# currently, optimParallel does badly with very large problems.
+				# adjust n.cores to account for its memory usage.
+				# this is just a very approximate computation of the required memory!
+				cls <- parallel::makeCluster(n.cores, outfile="")
+#				tmp <- optimParallelMP2(init, single.objective.function, fixed.pars=fixed.pars,
+				tmp <- optimParallel::optimParallel(init, single.objective.function, fixed.pars=fixed.pars,
+					control=optim.control, parallel=list(forward=TRUE, loginfo=FALSE, cl=cls))
+				parallel::stopCluster(cls)
+				tmp
+			} else {
+				message(sprintf("Optimizing with L-BFGS-B%s", ifelse(fast, ", with approximate likelihood", "")))
+				stats::optim(init, single.objective.function, fixed.pars=fixed.pars, method="L-BFGS-B",
+					control=optim.control)
+			}
+		}, "ucminf"={
+			message(sprintf("Optimizing with ucminf%s", ifelse(fast, ", with approximate likelihood", "")))
+			ucminf::ucminf(init, single.objective.function, fixed.pars=fixed.pars, hessian=0, control=optim.control)
+		}
+	)
 	fitted$lastvalue <- fitted$value
 	
 	optim.mat <- makeModelMatricesFromPars(fitted$par, nspecies, nenv, spnames=spnames, envnames=envnames
@@ -203,18 +245,13 @@ eicm.fit <- function(occurrences, env=NULL, traits=NULL, intercept=TRUE,
 #		}
 	}
 	
-	# note that we add the estimated latents to the environmental data matrix
-	out <- list(
-		data=eicm.data(occurrences=occurrences, env=cbind(env, optim.mat$samples), traits=traits)
-		, model=eicm.matrix(optim.mat$env, optim.mat$sp, optim.mat$samples, options)
-		, optim=fitted
-		, profile=NULL
-		, confint=NULL
-		, call=call
+	# note that we add the estimated latents to the environmental data matrix	
+	out <- as.eicm(
+		env.coefs=optim.mat$env, sp.coefs=optim.mat$sp, latent=optim.mat$samples, options=options,
+		occurrences=occurrences, env=cbind(env, optim.mat$samples), traits=traits, regularization=regularization
 	)
-	attr(out, "regularization") <- regularization
-	class(out) <- "eicm"
-
+	out[["optim"]] <- fitted
+	out[["call"]] <- call
 	return(out)
 }
 

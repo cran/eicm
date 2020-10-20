@@ -20,6 +20,10 @@
 #' Missing data in the response matrix is allowed.
 #' 
 #' @inheritParams eicm.fit
+#' @param rotate.latents logical. Rotate the estimated latent variable values (the values of the
+#'        latents at each sample) in the first step with PCA? Defaults to FALSE.
+#' @param scale.latents logical. Standardize the estimated latent variable values (the values of the
+#'        latents at each sample) in the first step? Defaults to TRUE.
 #' @param penalty the penalty applied to the number of species interactions to include, during variable selection.
 #' @param theta.threshold exclude species interactions (from network selection) whose preliminary coefficient (in absolute value)
 #'        is lower than this value. This exclusion criterion is cumulative with the other user-defined exclusions.
@@ -31,9 +35,13 @@
 #'        the estimated coefficients will be compared in each selection algorithm iteration.
 #' @param popsize.sel the population size for the genetic algorithm, expressed as the factor to multiply
 #'        by the recommended minimum. Ignored if \code{do.selection=FALSE}.
-#' @param n.cores the number of CPU cores to use in the variable selection stage. Ignored if \code{do.selection=FALSE}.
+#' @param n.cores the number of CPU cores to use in the variable selection stage and in the optimization.
+#' @param parallel logical. Whether to use \code{\link[optimParallel]{optimParallel}} during optimizations
+#'        instead of \code{\link[stats]{optim}}.
 #' @param do.selection logical. Conduct the variable selection stage, over species interaction network topology?
 #' @param do.plots logical. Plot diagnostic and trace plots?
+#' @param refit.selected logical. Refit with exact estimates the best model after network selection? Note that,
+#'        for performance reasons, the models fit during the network selection stage use an approximate likelihood.
 #'
 #' @return A \code{eicm.list} with the following components:
 #' \describe{
@@ -69,12 +77,17 @@
 #' @importClassesFrom GA ga
 #' @useDynLib eicm, .registration = TRUE, .fixes = "SR_"
 eicm <- function(occurrences, env=NULL, traits=NULL, intercept=TRUE,	# data
-	n.latent=0, forbidden=NULL, mask.sp=NULL, exclude.prevalence=0,		# formulation
-	regularization=c(ifelse(n.latent > 0, 6, 0.5), ifelse(do.selection, 0.5, 0.1)), regularization.type="ridge",				# regularization
+	n.latent=0, rotate.latents=FALSE, scale.latents=TRUE,				# latents
+	forbidden=NULL, allowed=NULL, mask.sp=NULL, exclude.prevalence=0,	# formulation
+	regularization=c(ifelse(n.latent > 0, 6, 0.5), 1), regularization.type="hybrid",	# regularization
 	penalty=4, theta.threshold=0.5, latent.lambda=1, fit.all.with.latents=TRUE,
-	popsize.sel=2, n.cores=parallel::detectCores(),
-	true.model=NULL, do.selection=TRUE, do.plots=TRUE) {
+	popsize.sel=2, n.cores=parallel::detectCores(), parallel=FALSE,
+	true.model=NULL, do.selection=TRUE, do.plots=TRUE, fast=FALSE,
+	refit.selected=TRUE) {
 
+	if(!(regularization.type %in% c("ridge", "lasso", "hybrid")))
+		stop("Regularization type must be one of: ridge, lasso, hybrid")
+		
 # TODO adjust regularization defaults, which apparently depend of the # of samples
 	attr(regularization, "type") <- regularization.type
 	
@@ -84,23 +97,39 @@ eicm <- function(occurrences, env=NULL, traits=NULL, intercept=TRUE,	# data
 	if(n.latent > 0) {
 		message("Fit latents, no interactions")
 
-		time0 <- system.time(latents.only <- fit.latents(env, occurrences, c(latent.lambda, 0)
-			, n.latent, fast=FALSE))
+		time0 <- system.time(latents.only <- fit.latents(env=env, occurrences=occurrences,
+			regularization=c(latent.lambda, 0), regularization.type="ridge",
+			nlat=n.latent, fast=FALSE, n.cores=ifelse(parallel, n.cores, 1)))
 
-		# standardize latents and counter-standardize their coefficients TODO do we need this?
-		f <- apply(latents.only$model$samples, 2, stats::sd)
-		latents.only$data$env[, -1] <- sweep(latents.only$data$env[, -1, drop=FALSE], 2, f, "/")
-		latents.only$model$env[, -1] <- sweep(latents.only$model$env[, -1, drop=FALSE], 2, f, "*")
-		latents.only$model$samples <- sweep(latents.only$model$samples, 2, f, "/")
+		if(scale.latents) {
+			# standardize latents and counter-standardize their coefficients
+			f <- apply(latents.only$model$samples, 2, stats::sd)
+			latents.only$data$env[, names(f)] <- sweep(latents.only$data$env[, names(f), drop=FALSE], 2, f, "/")
+			latents.only$model$env[, names(f)] <- sweep(latents.only$model$env[, names(f), drop=FALSE], 2, f, "*")
+			latents.only$model$samples <- sweep(latents.only$model$samples, 2, f, "/")
+		}
+		
+		if(rotate.latents) {
+			# rotate latent variable values
+			pc <- stats::prcomp(latents.only$model$samples)
+			# now rotate their responses with the same matrix
+			latents.only$model$env[, colnames(latents.only$model$samples)] <- 
+				latents.only$model$env[, colnames(latents.only$model$samples)] %*% pc$rotation
+			# and re-copy the latent values to the env table
+			latents.only$data$env[, colnames(latents.only$model$samples)] <- latents.only$model$samples
+		}
 		
 		if(!is.null(true.model) && do.plots) {
 			grDevices::dev.new(width=12, height=4)
 
 			coefficientComparisonPlot(latents.only$model, true.model, nenv.to.plot=n.latent, nlatent.to.plot=n.latent,
 				plot.intercept=TRUE, plot.interactions=FALSE)
-
 		}
-	}			
+		
+		# By the way, remember that we discard the estimated responses to latent variables.
+		# This first step is just to estimate the latent variable values at each site, everything
+		# else is discarded.
+	}
 
 	# fit the full network, so that weak interactions may be discarded
 	# TODO: if theta.threshold==0, we don't need to fit all interactions
@@ -112,12 +141,14 @@ eicm <- function(occurrences, env=NULL, traits=NULL, intercept=TRUE,	# data
 			# fix latent values
 			message("Fit the model with all interactions, with latent values fixed")
 			model$model$sp <- matrix(stats::runif(ncol(model$model$sp) * ncol(model$model$sp), -0.5, 0.5), ncol=ncol(model$model$sp))
-			# here we use model$data$env, which has the estimated latent values
+			# here we use model$data$env, which has the estimated latent values appended to it
 			time1 <- system.time(fitted.model <- eicm.fit(
 				model$data$occurrences, env=model$data$env, traits=traits, intercept=FALSE,
 				n.latent=0, initial.values=model$model,
-				options=options, forbidden=forbidden, exclude.prevalence=exclude.prevalence,
-				fast=TRUE, regularization=regularization))
+				options=options, forbidden=forbidden, allowed=allowed, exclude.prevalence=exclude.prevalence,
+				fast=TRUE, n.cores=ifelse(parallel, n.cores, 1),
+				optim.method="L-BFGS-B",
+				regularization=regularization, regularization.type=regularization.type))
 		} else {
 			message("Fit the model with all interactions, with no latents")
 			# remove estimated latent coefficients from environmental matrix
@@ -127,8 +158,10 @@ eicm <- function(occurrences, env=NULL, traits=NULL, intercept=TRUE,	# data
 			time1 <- system.time(fitted.model <- eicm.fit(
 				occurrences, env=env, traits=traits, intercept=TRUE,
 				n.latent=0, initial.values=model$model,
-				options=options, forbidden=forbidden, exclude.prevalence=exclude.prevalence,
-				fast=TRUE, regularization=regularization))
+				options=options, forbidden=forbidden, allowed=allowed, exclude.prevalence=exclude.prevalence,
+				fast=TRUE, n.cores=ifelse(parallel, n.cores, 1),
+				optim.method="L-BFGS-B",
+				regularization=regularization, regularization.type=regularization.type))
 		}
 
 		if(!is.null(true.model) && nrow(fitted.model$model$env) != nrow(true.model$model$env)) warning("Some species are missing from the estimated model")
@@ -137,8 +170,10 @@ eicm <- function(occurrences, env=NULL, traits=NULL, intercept=TRUE,	# data
 		# fit the model with everything
 		time1 <- system.time(fitted.model <- eicm.fit(occurrences, env=env, traits=traits, intercept=TRUE
 			, n.latent=0,
-			options=options, forbidden=forbidden, exclude.prevalence=exclude.prevalence,
-			fast=TRUE, regularization=regularization))
+			options=options, forbidden=forbidden, allowed=allowed, exclude.prevalence=exclude.prevalence,
+			fast=TRUE, n.cores=ifelse(parallel, n.cores, 1),
+			optim.method="L-BFGS-B",
+			regularization=regularization, regularization.type=regularization.type))
 			
 		latents.only <- fitted.model
 		latents.only$model$sp[, ] <- 0
@@ -158,12 +193,39 @@ eicm <- function(occurrences, env=NULL, traits=NULL, intercept=TRUE,	# data
 		if(do.plots) {
 			monitor.function <- function(model, plot.interactions) {
 				return(
-					coefficientComparisonPlot(model, true.model, nenv.to.plot=ncol(fitted.model$model$env) - 1, nlatent.to.plot=0,
-						plot.intercept=TRUE, excluded.interactions=abs(fitted.model$model$sp) < theta.threshold, plot.interactions=plot.interactions)
+					coefficientComparisonPlot(model, true.model, nenv.to.plot=ncol(fitted.model$model$env) - 1,
+						nlatent.to.plot=0, plot.intercept=TRUE,
+						excluded.interactions=abs(fitted.model$model$sp) < theta.threshold,
+						plot.interactions=plot.interactions)
 				)
 			}
-			selection.monitor <- function(object, bestmodel, worstmodel) {monitor.function(bestmodel, plot.interactions=TRUE)}
-		} else selection.monitor <- NULL
+			selection.monitor <- function(object, bestmodel, worstmodel) {
+				stats <- monitor.function(bestmodel, plot.interactions=TRUE)
+				if(!is.null(object)) {
+					fitness.stats <- stats::quantile(stats::na.exclude(object@fitness), probs=c(0, 0.5, 1))
+					message(sprintf("\rIt %d (%.0fs, ciT %d+%d/%d) | Fit %.1f %.1f %.1f | %d TP %d FN %d FP",
+						object@iter, object@time.took, object@cached, object@informed, object@cache.size,
+						fitness.stats[3], fitness.stats[2], fitness.stats[1],
+						stats["correct"], stats["missed"], stats["spurious"]))
+					utils::flush.console()
+				}
+			}
+		} else {
+			selection.monitor <- function(object, bestmodel, worstmodel) {
+				stats <- coefficientComparisonPlot(bestmodel, true.model, nenv.to.plot=ncol(fitted.model$model$env) - 1,
+					nlatent.to.plot=0, plot.intercept=TRUE,
+					excluded.interactions=abs(fitted.model$model$sp) < theta.threshold,
+					plot.interactions=TRUE, noplot=TRUE)
+				if(!is.null(object)) {
+					fitness.stats <- stats::quantile(stats::na.exclude(object@fitness), probs=c(0, 0.5, 1))
+					message(sprintf("\rIt %d (%.0fs, ciT %d+%d/%d) | Fit %.1f %.1f %.1f | %d TP %d FN %d FP",
+						object@iter, object@time.took, object@cached, object@informed, object@cache.size,
+						fitness.stats[3], fitness.stats[2], fitness.stats[1],
+						stats["correct"], stats["missed"], stats["spurious"]))
+					utils::flush.console()
+				}
+			}
+		}
 	
 		if(do.plots && !is.null(latents.only)) {
 			grDevices::dev.new(width=12, height=4)
@@ -177,8 +239,11 @@ eicm <- function(occurrences, env=NULL, traits=NULL, intercept=TRUE,	# data
 	} else {
 		if(do.plots) {
 			selection.monitor <- function(object, bestmodel, worstmodel) {
-				if(is.null(bestmodel)) return
+				if(is.null(bestmodel)) return(invisible(NULL))
 				plot.eicm.matrix(bestmodel, type="network")
+				if(!is.null(object)) {
+					gaMonitor.eicm(object, bestmodel, worstmodel)
+				}
 			}
 		} else selection.monitor <- NULL
 	}
@@ -204,7 +269,7 @@ eicm <- function(occurrences, env=NULL, traits=NULL, intercept=TRUE,	# data
 	time2 <- system.time(var.selection <- model.selection.network(latents.only.copy, regularization=regularization
 		, regularization.type=regularization.type
 		, penalty=penalty, masksp=masksp, select.direction=TRUE, exclude.prevalence=exclude.prevalence
-		, fast=TRUE, optim.method = "ucminf", optim.control = list(trace=0, maxeval=10000, gradstep=c(0.001, 0.001), grtol=0.1)
+		, fast=TRUE, optim.method="ucminf", optim.control=list(trace=0, maxeval=10000, gradstep=c(0.001, 0.001), grtol=0.1)
 		#, fast=FALSE, optim.method = "L-BFGS-B", optim.control = list(trace=0, maxit=10000, ndeps=0.001)
 		, parallel=n.cores
 		, maxit.stagnated=50, pmutation = 0.01, popsize.factor=popsize.sel
@@ -215,11 +280,19 @@ eicm <- function(occurrences, env=NULL, traits=NULL, intercept=TRUE,	# data
 	selected.model <- var.selection@allEvaluations[[paste(bits, collapse="")]]
 
 	selected.model <- list(
-		data=eicm.data(occurrences=occurrences, env=env)
+		data=eicm.data(occurrences=occurrences, env=latents.only.copy$data$env)
 		, model=eicm.matrix(selected.model$env, sp.coefs=selected.model$sp, latent=selected.model$samples, options=selected.model$options)
 	)
 	attr(selected.model, "regularization") <- regularization
 	class(selected.model) <- "eicm"
+
+	if(refit.selected) {	
+		selected.model <- eicm.fit(occurrences=selected.model$data$occurrences, env=selected.model$data$env,
+			traits=selected.model$data$traits, options=selected.model$model$options, n.latent=0,
+			regularization=attr(selected.model, "regularization"),
+			regularization.type=attr(attr(selected.model, "regularization"), "type"),
+			fast=FALSE, n.cores=n.cores)
+	}
 
 	if(is.function(selection.monitor))
 		selection.monitor(NULL, selected.model$model, NULL)
@@ -237,7 +310,8 @@ eicm <- function(occurrences, env=NULL, traits=NULL, intercept=TRUE,	# data
 }
 
 # Utility function to estimate latents possibly with given species coefficients
-fit.latents <- function(env, occurrences, regularization, nlat, envcoefs=NULL, spcoefs=NULL, fast=FALSE) {
+fit.latents <- function(env, occurrences, regularization, regularization.type, nlat,
+	envcoefs=NULL, spcoefs=NULL, fast=FALSE, n.cores) {
 	if(is.null(env))
 		env <- matrix(0, nrow=nrow(occurrences), ncol=0)
 
@@ -256,9 +330,19 @@ fit.latents <- function(env, occurrences, regularization, nlat, envcoefs=NULL, s
 
 	model <- eicm.fit(occurrences, env=env, intercept=TRUE
 		, options=options
-		, fast=fast
-		, n.latent=nlat		
-		, regularization=regularization)
+		, fast=fast, n.cores=n.cores
+		, n.latent=nlat
+		, regularization=regularization, regularization.type=regularization.type)
+
 	return(model)
+}
+
+gaMonitor.eicm <- function(object, bestmodel, worstmodel) {
+	fitness.stats <- stats::quantile(stats::na.exclude(object@fitness), probs=c(0, 0.5, 1))
+	nterms.stats <- stats::quantile(apply(object@population, 1, sum), probs=c(0, 0.5, 1))
+	message(sprintf("\rIt %d (%.0fs, ciT %d+%d/%d) | Fit %.1f %.1f %.1f | #term %d %d %d",
+		object@iter, object@time.took, object@cached, object@informed, object@cache.size
+		, fitness.stats[3], fitness.stats[2], fitness.stats[1], nterms.stats[1], as.integer(nterms.stats[2]), nterms.stats[3]))
+	utils::flush.console()
 }
 

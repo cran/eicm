@@ -4,14 +4,26 @@
 \alias{eicm.fit}
 \title{Estimate a EICM model}
 \usage{
-eicm.fit(occurrences, env = NULL, traits = NULL, intercept = TRUE,
-  n.latent = 0, forbidden = NULL, mask.sp = NULL,
-  exclude.prevalence = 0, options = NULL, initial.values = NULL,
-  regularization = c(ifelse(n.latent > 0, 0.5, 0), 0.5),
-  regularization.type = "ridge", fast = FALSE,
-  optim.method = ifelse(fast, "ucminf", "L-BFGS-B"), optim.control = if
-  (fast) list(trace = 1, maxeval = 10000, gradstep = c(0.001, 0.001), grtol
-  = 0.1) else list(trace = 1, maxit = 10000, ndeps = 1e-04))
+eicm.fit(
+  occurrences,
+  env = NULL,
+  traits = NULL,
+  intercept = TRUE,
+  n.latent = 0,
+  forbidden = NULL,
+  allowed = NULL,
+  mask.sp = NULL,
+  exclude.prevalence = 0,
+  options = NULL,
+  initial.values = NULL,
+  regularization = c(ifelse(n.latent > 0, 0.5, 0), 1),
+  regularization.type = "hybrid",
+  fast = FALSE,
+  n.cores = 1,
+  optim.method = "L-BFGS-B",
+  optim.control = list(trace = 1, maxit = 10000, ndeps = 1e-04, factr = ifelse(fast,
+    1e-04, 1e-06)/.Machine$double.eps)
+)
 }
 \arguments{
 \item{occurrences}{a binary (0/1) sample x species matrix, possibly including NAs.}
@@ -25,7 +37,10 @@ species interactions \emph{a priori}.}
 
 \item{n.latent}{the number of latent variables to estimate.}
 
-\item{forbidden}{a formula defining which species interactions are not to be estimated. See details.
+\item{forbidden}{a formula (or list of) defining which species interactions are not to be estimated. See details.
+This constraint is cumulative with other constraints (\code{mask.sp} and \code{exclude.prevalence}).}
+
+\item{allowed}{a formula (or list of) defining which species interactions are to be estimated. See details.
 This constraint is cumulative with other constraints (\code{mask.sp} and \code{exclude.prevalence}).}
 
 \item{mask.sp}{a scalar or a binary square species x species matrix defining which species interactions to exclude
@@ -47,9 +62,13 @@ fitting when there are previous estimates available.}
 \item{regularization}{a two-element numeric vector defining the regularization lambdas used for
 environmental coefficients and for species interactions respectively. See details.}
 
-\item{regularization.type}{one of "lasso" or "ridge", defining the type of penalty to apply.}
+\item{regularization.type}{one of "lasso", "ridge" or "hybrid", defining the type of penalty to apply.
+Type "hybrid" applies ridge penalty to environmental coefficients and LASSO to interaction coefficients.}
 
 \item{fast}{a logical defining whether to do a fast - but less accurate - estimation, or a normal estimation.}
+
+\item{n.cores}{the number of CPU cores to use in the L-BFGS-B optimization. This may be reduced to prevent
+excessive memory usage.}
 
 \item{optim.method}{the optimization function to use. Should be set to the default.}
 
